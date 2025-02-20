@@ -27,8 +27,8 @@ def load_model():
 
 model = load_model()
 
-# xAI API setup
-XAI_API_URL = "https://api.xai.com/v1/chat/completions"  # Hypothetical endpoint; replace with actual xAI URL
+# xAI API setup  "https://api.x.ai/v1/chat/completions"
+XAI_API_URL = "https://api.x.ai/v1/chat/completions"  # Replace with actual xAI URL
 XAI_API_KEY = st.secrets["xai"]["api_key"]
 
 # Function to chunk text
@@ -69,7 +69,7 @@ def ask_xai(question, context_chunks):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "grok",  # Assuming Grok is the model; adjust as per xAI docs
+        "model": "grok-beta",  # Adjust as per xAI docs
         "messages": [
             {"role": "system", "content": "You are a helpful assistant that answers questions based on provided data."},
             {"role": "user", "content": prompt}
@@ -110,13 +110,15 @@ with tab1:
         if main_text.strip():
             text_chunks = chunk_text(main_text)
             chunk_embeddings = [vectorize_text(chunk) for chunk in text_chunks]
-            doc = {
-                "main_text": main_text,
-                "chunks": [{"text": chunk, "embedding": embedding} for chunk, embedding in zip(text_chunks, chunk_embeddings)],
-                "slides": slides,
-                "timestamp": datetime.utcnow()
-            }
-            collection.insert_one(doc)
+            for chunk, embedding in zip(text_chunks, chunk_embeddings):
+                doc = {
+                    "original_text": main_text,
+                    "chunk_text": chunk,
+                    "embedding": embedding,
+                    "slides": slides,
+                    "timestamp": datetime.utcnow()
+                }
+                collection.insert_one(doc)
             st.success("Data uploaded successfully!")
         else:
             st.error("Please enter some text.")
@@ -136,32 +138,34 @@ with tab2:
                 {
                     "$vectorSearch": {
                         "index": "vector_index",
-                        "path": "chunks.embedding",
+                        "path": "embedding",
                         "queryVector": query_embedding,
-                        "limit": 3,
+                        "limit": 10,
                         "numCandidates": 1000
                     }
                 },
-                {"$project": {"main_text": 1, "chunks": 1, "score": {"$meta": "vectorSearchScore"}}}
+                {"$project": {"original_text": 1, "chunk_text": 1, "score": {"$meta": "vectorSearchScore"}}},
+                {"$limit": 3}
             ]
-            results = list(collection.aggregate(pipeline))
-            st.write("Debug: Raw Vector Search Results:", results)
-            
-            if results:
-                # Extract relevant chunks
-                context_chunks = []
-                for result in results:
-                    context_chunks.extend([c for c in result["chunks"] if "text" in c])
-                st.write("Debug: Context Chunks:", context_chunks[:3])
+            try:
+                results = list(collection.aggregate(pipeline))
+                st.write("Debug: Raw Vector Search Results:", results)
                 
-                # Ask xAI
-                answer = ask_xai(question, context_chunks[:3])
-                st.write("**Answer:**", answer)
-                st.write("**Referenced Chunks:**")
-                for i, chunk in enumerate(context_chunks[:3], 1):
-                    st.write(f"{i}. {chunk['text']} (Score: {chunk.get('score', 'N/A')})")
-            else:
-                st.write("No relevant data found to answer your question.")
+                if results:
+                    # Adjust context_chunks to use new field names
+                    context_chunks = [{"text": r["chunk_text"], "score": r["score"]} for r in results]
+                    st.write("Debug: Context Chunks:", context_chunks)
+                    
+                    # Ask xAI
+                    answer = ask_xai(question, context_chunks)
+                    st.write("**Answer:**", answer)
+                    st.write("**Referenced Chunks:**")
+                    for i, chunk in enumerate(context_chunks, 1):
+                        st.write(f"{i}. {chunk['text']} (Score: {chunk['score']})")
+                else:
+                    st.write("No relevant data found to answer your question.")
+            except pymongo.errors.OperationFailure as e:
+                st.error(f"MongoDB Error: {e}")
         else:
             st.error("Please enter a question.")
 
