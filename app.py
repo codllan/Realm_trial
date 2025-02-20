@@ -1,3 +1,4 @@
+##run command##  streamlit run c:/Users/Greenlight.Remote1/Documents/Programming.Files/ProgrammingProjects/realm-trial/Realm_trial/app.py [ARGUMENTS] --server.fileWatcherType=none
 import streamlit as st
 import pymongo
 from sentence_transformers import SentenceTransformer
@@ -6,6 +7,7 @@ import io
 import base64
 import numpy as np
 from datetime import datetime
+import requests
 
 # MongoDB connection
 @st.cache_resource
@@ -15,8 +17,8 @@ def init_connection():
     return client
 
 client = init_connection()
-db = client["vector_db"]  # Your database name
-collection = db["data_entries"]  # Your collection name
+db = client["vector_db"]
+collection = db["data_entries"]
 
 # Load embedding model
 @st.cache_resource
@@ -24,6 +26,10 @@ def load_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
 model = load_model()
+
+# xAI API setup
+XAI_API_URL = "https://api.xai.com/v1/chat/completions"  # Hypothetical endpoint; replace with actual xAI URL
+XAI_API_KEY = st.secrets["xai"]["api_key"]
 
 # Function to chunk text
 def chunk_text(text, max_length=200):
@@ -45,7 +51,7 @@ def chunk_text(text, max_length=200):
 
 # Function to vectorize text
 def vectorize_text(text):
-    return model.encode(text).tolist()  # Convert to list for MongoDB storage
+    return model.encode(text).tolist()
 
 # Function to encode image to base64
 def image_to_base64(image):
@@ -53,20 +59,42 @@ def image_to_base64(image):
     image.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode()
 
-# Streamlit UI
-st.title("Vector Data Collector with Semantic Search")
+# Function to query xAI
+def ask_xai(question, context_chunks):
+    context = "\n".join([chunk["text"] for chunk in context_chunks])
+    prompt = f"Based on the following data:\n\n{context}\n\nAnswer this question: {question}"
+    
+    headers = {
+        "Authorization": f"Bearer {XAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "grok",  # Assuming Grok is the model; adjust as per xAI docs
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant that answers questions based on provided data."},
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 300,
+        "temperature": 0.7
+    }
+    
+    response = requests.post(XAI_API_URL, headers=headers, json=payload)
+    if response.status_code == 200:
+        return response.json()["choices"][0]["message"]["content"]
+    else:
+        st.error(f"xAI API Error: {response.status_code} - {response.text}")
+        return "Sorry, I couldn’t process your question."
 
-# Tabs for data entry and search
-tab1, tab2 = st.tabs(["Enter Data", "Semantic Search"])
+# Streamlit UI
+st.title("Vector Data Collector with xAI Question-Answering")
+
+# Tabs
+tab1, tab2 = st.tabs(["Enter Data", "Ask a Question"])
 
 # --- Data Entry Tab ---
 with tab1:
     st.header("Enter Your Data")
-    
-    # Main paragraph text
     main_text = st.text_area("Main Paragraph", height=200)
-    
-    # Slides for screenshots and notes
     st.subheader("Add Screenshots and Notes")
     num_slides = st.number_input("Number of Slides", min_value=1, max_value=5, value=1)
     slides = []
@@ -78,65 +106,65 @@ with tab1:
             image = Image.open(screenshot)
             slides.append({"screenshot": image_to_base64(image), "notes": notes})
     
-    # Upload button
     if st.button("Upload"):
         if main_text.strip():
-            # Chunk the main text
             text_chunks = chunk_text(main_text)
             chunk_embeddings = [vectorize_text(chunk) for chunk in text_chunks]
-            
-            # Prepare document for MongoDB
             doc = {
                 "main_text": main_text,
                 "chunks": [{"text": chunk, "embedding": embedding} for chunk, embedding in zip(text_chunks, chunk_embeddings)],
                 "slides": slides,
                 "timestamp": datetime.utcnow()
             }
-            
-            # Insert into MongoDB
             collection.insert_one(doc)
             st.success("Data uploaded successfully!")
         else:
-            st.error("Please enter some text in the main paragraph.")
+            st.error("Please enter some text.")
 
-# --- Semantic Search Tab ---
+# --- Question-Answering Tab ---
 with tab2:
-    st.header("Semantic Search")
-    query = st.text_input("Enter your search query")
-    if st.button("Search"):
-        if query.strip():
-            # Vectorize the query
-            query_embedding = vectorize_text(query)
+    st.header("Ask a Question")
+    question = st.text_input("Enter your question about the data")
+    if st.button("Ask"):
+        if question.strip():
+            # Vectorize the question
+            query_embedding = vectorize_text(question)
+            st.write("Debug: Query Embedding Sample:", query_embedding[:5])
             
-            # Perform vector search (assumes a vector index is created in MongoDB Atlas)
+            # Perform vector search
             pipeline = [
                 {
                     "$vectorSearch": {
-                        "index": "vector_index",  # Name of your vector index in MongoDB
+                        "index": "vector_index",
                         "path": "chunks.embedding",
                         "queryVector": query_embedding,
                         "limit": 3,
-                        "numCandidates": 100
+                        "numCandidates": 1000
                     }
                 },
-                {"$project": {"main_text": 1, "chunks.text": 1, "score": {"$meta": "vectorSearchScore"}}}
+                {"$project": {"main_text": 1, "chunks": 1, "score": {"$meta": "vectorSearchScore"}}}
             ]
-            
             results = list(collection.aggregate(pipeline))
+            st.write("Debug: Raw Vector Search Results:", results)
             
             if results:
-                st.write("Top 3 Matching Chunks:")
-                for i, result in enumerate(results, 1):
-                    st.write(f"**Result {i} (Score: {result['score']:.4f})**")
-                    for chunk in result["chunks"]:
-                        st.write(f"- {chunk['text']}")
-                    st.write(f"From: {result['main_text'][:200]}...")
-                    st.write("---")
+                # Extract relevant chunks
+                context_chunks = []
+                for result in results:
+                    context_chunks.extend([c for c in result["chunks"] if "text" in c])
+                st.write("Debug: Context Chunks:", context_chunks[:3])
+                
+                # Ask xAI
+                answer = ask_xai(question, context_chunks[:3])
+                st.write("**Answer:**", answer)
+                st.write("**Referenced Chunks:**")
+                for i, chunk in enumerate(context_chunks[:3], 1):
+                    st.write(f"{i}. {chunk['text']} (Score: {chunk.get('score', 'N/A')})")
             else:
-                st.write("No matches found.")
+                st.write("No relevant data found to answer your question.")
         else:
-            st.error("Please enter a search query.")
+            st.error("Please enter a question.")
 
-# Instructions for running
-st.sidebar.write("Run this app with: `streamlit run app.py`")
-st.sidebar.write("Ensure MongoDB Atlas Vector Search index 'vector_index' is set up on 'chunks.embedding'.")
+# Instructions
+st.sidebar.write("Run with: `streamlit run app.py --server.fileWatcherType=none`")
+st.sidebar.write("Ensure MongoDB Atlas vector_index and xAI API key are set up.")
