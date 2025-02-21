@@ -60,29 +60,27 @@ def image_to_base64(image):
     return base64.b64encode(buffered.getvalue()).decode()
 
 # Function to query xAI
+def detect_conflicts(chunks):
+    embeddings = [vectorize_text(chunk["text"]) for chunk in chunks]
+    conflicts = []
+    for i in range(len(embeddings)):
+        for j in range(i + 1, len(embeddings)):
+            similarity = np.dot(embeddings[i], embeddings[j]) / (np.linalg.norm(embeddings[i]) * np.linalg.norm(embeddings[j]))
+            if similarity < 0.3:
+                conflicts.append((chunks[i]["text"], chunks[j]["text"]))
+    return conflicts
+
 def ask_xai(question, context_chunks):
     context = "\n".join([chunk["text"] for chunk in context_chunks])
-    prompt = f"Based on the following data:\n\n{context}\n\nAnswer this question: {question}"
-    
-    headers = {
-        "Authorization": f"Bearer {XAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "grok-beta",  # Adjust as per xAI docs
-        "messages": [
-            {"role": "system", "content": "You are a helpful assistant that answers questions based on provided data."},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 300,
-        "temperature": 0.7
-    }
-    
-    response = requests.post(XAI_API_URL, headers=headers, json=payload)
-    if response.status_code == 200:
+    prompt = f"Based on the following data:\n\n{context}\n\nAnswer this question: {question}. Carefully consider all provided information. If the data contains conflicting statements, explain both perspectives, including any conditions or context (e.g., specific actions or settings) that affect the outcome."
+    headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
+    payload = {"model": "grok-beta", "messages": [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": prompt}], "max_tokens": 300, "temperature": 0.7}
+    try:
+        response = requests.post(XAI_API_URL, headers=headers, json=payload)
+        response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
-    else:
-        st.error(f"xAI API Error: {response.status_code} - {response.text}")
+    except requests.exceptions.RequestException as e:
+        st.error(f"xAI API Error: {e}")
         return "Sorry, I couldn’t process your question."
 
 # Streamlit UI
@@ -129,39 +127,33 @@ with tab2:
     question = st.text_input("Enter your question about the data")
     if st.button("Ask"):
         if question.strip():
-            # Vectorize the question
             query_embedding = vectorize_text(question)
             st.write("Debug: Query Embedding Sample:", query_embedding[:5])
-            
-            # Perform vector search
             pipeline = [
-                {
-                    "$vectorSearch": {
-                        "index": "vector_index",
-                        "path": "embedding",
-                        "queryVector": query_embedding,
-                        "limit": 10,
-                        "numCandidates": 1000
-                    }
-                },
-                {"$project": {"original_text": 1, "chunk_text": 1, "score": {"$meta": "vectorSearchScore"}}},
+                {"$vectorSearch": {"index": "vector_index", "path": "embedding", "queryVector": query_embedding, "limit": 10, "numCandidates": 1000}},
+                {"$project": {"original_text": 1, "chunk_text": 1, "slides": 1, "score": {"$meta": "vectorSearchScore"}}},
                 {"$limit": 3}
             ]
             try:
                 results = list(collection.aggregate(pipeline))
                 st.write("Debug: Raw Vector Search Results:", results)
-                
                 if results:
-                    # Adjust context_chunks to use new field names
                     context_chunks = [{"text": r["chunk_text"], "score": r["score"]} for r in results]
+                    conflicts = detect_conflicts(context_chunks)
                     st.write("Debug: Context Chunks:", context_chunks)
-                    
-                    # Ask xAI
+                    if conflicts:
+                        st.warning("Conflicts detected:")
+                        for c1, c2 in conflicts:
+                            st.write(f"- '{c1}' vs '{c2}'")
                     answer = ask_xai(question, context_chunks)
                     st.write("**Answer:**", answer)
-                    st.write("**Referenced Chunks:**")
-                    for i, chunk in enumerate(context_chunks, 1):
-                        st.write(f"{i}. {chunk['text']} (Score: {chunk['score']})")
+                    st.write("**Referenced Chunks and Images:**")
+                    for i, result in enumerate(results, 1):
+                        st.write(f"{i}. {result['chunk_text']} (Score: {result['score']})")
+                        if "slides" in result and result["slides"]:
+                            for slide in result["slides"]:
+                                image_data = base64.b64decode(slide["screenshot"])
+                                st.image(image_data, caption=slide["notes"], width=300)
                 else:
                     st.write("No relevant data found to answer your question.")
             except pymongo.errors.OperationFailure as e:
