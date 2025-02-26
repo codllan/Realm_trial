@@ -56,14 +56,14 @@ def ask_xai(question, context_chunks):
         return "Sorry, I couldn’t process your question."
 
 # Streamlit UI
-st.title("Vector Data Collector with xAI Question-Answering")
+st.title("Data Collection & xAI Query")
 
 # Tabs
 tab1, tab2 = st.tabs(["Enter Data", "Ask a Question"])
 
 # --- Data Entry Tab ---
 with tab1:
-    st.header("Enter Your Data")
+    st.header("")
     
     # Initialize session state for input fields and slides
     if "subject" not in st.session_state:
