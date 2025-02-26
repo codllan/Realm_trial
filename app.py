@@ -8,12 +8,14 @@ import base64
 from datetime import datetime
 import requests
 import uuid
+from pptx import Presentation  # For PowerPoint generation
+from pptx.util import Inches
 
 # MongoDB connection
 @st.cache_resource
 def init_connection():
     connection_string = st.secrets["mongo"]["connection_string"]
-    client = pymongo.MongoClient(connection_string)
+    client = pymongo.MongoClient(connection_string, tls=True)
     return client
 
 client = init_connection()
@@ -23,7 +25,7 @@ collection = db["data_entries"]
 # Load embedding model
 @st.cache_resource
 def load_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')
+    return SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
 
 model = load_model()
 
@@ -41,6 +43,58 @@ def image_to_base64(image):
     image.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode()
 
+# Function to create a thumbnail from base64
+def create_thumbnail(base64_string, size=(100, 100)):
+    image_data = base64.b64decode(base64_string)
+    img = Image.open(io.BytesIO(image_data))
+    img.thumbnail(size)
+    buffered = io.BytesIO()
+    img.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode()
+
+# Function to export document to PowerPoint
+def export_to_pptx(doc_id, subject, main_text, slides):
+    prs = Presentation()
+    
+    # Title Slide: Subject and Timestamp
+    slide = prs.slides.add_slide(prs.slide_layouts[0])  # Title and Content layout
+    title = slide.shapes.title
+    subtitle = slide.placeholders[1]
+    title.text = subject
+    subtitle.text = f"Document ID: {doc_id}\nUploaded: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    
+    # Main Text Slide
+    slide = prs.slides.add_slide(prs.slide_layouts[1])  # Title and Content
+    title = slide.shapes.title
+    content = slide.placeholders[1]
+    title.text = "Main Content"
+    content.text = main_text
+    
+    # Slides with Images and Notes
+    for slide_data in slides:
+        slide = prs.slides.add_slide(prs.slide_layouts[5])  # Blank layout
+        left = Inches(1)
+        top = Inches(1)
+        width = Inches(8)
+        height = Inches(4)
+        
+        # Add image
+        img_data = base64.b64decode(slide_data["screenshot"])
+        img_stream = io.BytesIO(img_data)
+        slide.shapes.add_picture(img_stream, left, top, width, height)
+        
+        # Add notes below image
+        notes_top = top + height + Inches(0.5)
+        textbox = slide.shapes.add_textbox(left, notes_top, width, Inches(1))
+        text_frame = textbox.text_frame
+        text_frame.text = slide_data["notes"] if slide_data["notes"] else "No notes"
+    
+    # Save to a BytesIO buffer
+    buffer = io.BytesIO()
+    prs.save(buffer)
+    buffer.seek(0)
+    return buffer
+
 # Function to query xAI
 def ask_xai(question, context_chunks):
     context = "\n".join([chunk["text"] for chunk in context_chunks])
@@ -56,16 +110,15 @@ def ask_xai(question, context_chunks):
         return "Sorry, I couldn’t process your question."
 
 # Streamlit UI
-st.title("Data Collection & xAI Query")
+st.title("Vector Data Collector with xAI Question-Answering")
 
 # Tabs
-tab1, tab2 = st.tabs(["Enter Data", "Ask a Question"])
+tab1, tab2, tab3 = st.tabs(["Enter Data", "Ask a Question", "Previous Uploads"])
 
 # --- Data Entry Tab ---
 with tab1:
-    # st.header("")
+    st.header("Enter Your Data")
     
-    # Initialize session state for input fields and slides
     if "subject" not in st.session_state:
         st.session_state.subject = ""
     if "main_text" not in st.session_state:
@@ -75,40 +128,32 @@ with tab1:
     if "notes" not in st.session_state:
         st.session_state.notes = {}
     if "slides_draft" not in st.session_state:
-        st.session_state.slides_draft = {}  # Store file data as base64
+        st.session_state.slides_draft = {}
 
-    # Subject and Main Paragraph inputs
     subject = st.text_input("Subject", value=st.session_state.subject, key="subject_input")
     main_text = st.text_area("Main Paragraph", value=st.session_state.main_text, height=200, key="main_text_input")
     st.subheader("Add Screenshots and Notes")
 
-    # Store slide data
     slides = []
     for i in range(st.session_state.slide_count):
         st.write(f"Slide {i+1}")
         screenshot_key = f"screen_{i}"
         notes_key = f"notes_{i}"
 
-        # File uploader with draft persistence
         screenshot = st.file_uploader(f"Screenshot {i+1}", type=["png", "jpg", "jpeg"], key=screenshot_key)
         if screenshot:
-            # Convert uploaded file to base64 and store in session state
             image = Image.open(screenshot)
             st.session_state.slides_draft[screenshot_key] = {"screenshot": image_to_base64(image), "name": screenshot.name}
         
-        # Display the persisted file name if available
         if screenshot_key in st.session_state.slides_draft:
             st.write(f"Uploaded: {st.session_state.slides_draft[screenshot_key]['name']}")
         
-        # Notes field
         if notes_key not in st.session_state.notes:
             st.session_state.notes[notes_key] = ""
         notes = st.text_input(f"Notes for Slide {i+1}", value=st.session_state.notes[notes_key], key=notes_key)
 
-        # Add slide to list if it has a file
         if screenshot_key in st.session_state.slides_draft:
             slides.append({"screenshot": st.session_state.slides_draft[screenshot_key]["screenshot"], "notes": notes})
-            # Add a new box if this is the last one and has a file
             if i == st.session_state.slide_count - 1:
                 st.session_state.slide_count += 1
 
@@ -138,7 +183,6 @@ with tab1:
                 collection.insert_one(doc)
             st.success(f"Data uploaded successfully! Document ID: {doc_id}")
             
-            # Clear all fields and reset draft
             st.session_state.subject = ""
             st.session_state.main_text = ""
             st.session_state.notes = {}
@@ -182,6 +226,62 @@ with tab2:
                 st.error(f"MongoDB Error: {e}")
         else:
             st.error("Please enter a question.")
+
+# --- Previous Uploads Tab ---
+with tab3:
+    st.header("Previous Uploads")
+    
+    try:
+        pipeline = [
+            {"$group": {
+                "_id": "$doc_id",
+                "subject": {"$first": "$subject"},
+                "original_text": {"$first": "$original_text"},
+                "timestamp": {"$max": "$timestamp"},
+                "slides": {"$push": "$slides"}
+            }},
+            {"$sort": {"timestamp": -1}}
+        ]
+        documents = list(collection.aggregate(pipeline))
+        
+        if documents:
+            cols = st.columns(3)
+            for idx, doc in enumerate(documents):
+                col = cols[idx % 3]
+                with col:
+                    st.markdown(
+                        f"""
+                        <div style='border: 1px solid #ddd; border-radius: 8px; padding: 10px; margin: 10px 0; background-color: #f9f9f9; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>
+                            <h4>{doc['subject']}</h4>
+                            <p style='font-size: 12px; color: #666;'>Doc ID: {doc['_id']}</p>
+                            <p style='font-size: 12px; color: #666;'>Uploaded: {doc['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}</p>
+                        """, 
+                        unsafe_allow_html=True
+                    )
+                    
+                    all_slides = [slide for sublist in doc['slides'] for slide in sublist if slide]
+                    if all_slides:
+                        for slide in all_slides:
+                            thumbnail = create_thumbnail(slide["screenshot"])
+                            st.image(f"data:image/png;base64,{thumbnail}", width=100)
+                            st.caption(slide["notes"] if slide["notes"] else "No notes")
+                    else:
+                        st.write("No attachments")
+                    
+                    # Export to PowerPoint button
+                    pptx_buffer = export_to_pptx(doc["_id"], doc["subject"], doc["original_text"], all_slides)
+                    st.download_button(
+                        label="Export to PowerPoint",
+                        data=pptx_buffer,
+                        file_name=f"{doc['subject']}_{doc['_id']}.pptx",
+                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                    )
+                    
+                    st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.write("No previous uploads found.")
+    except pymongo.errors.PyMongoError as e:
+        st.error(f"Error fetching uploads: {e}")
 
 # Instructions
 # st.sidebar.write("Run with: `streamlit run app.py --server.fileWatcherType=none`")
