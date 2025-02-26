@@ -63,7 +63,7 @@ tab1, tab2 = st.tabs(["Enter Data", "Ask a Question"])
 
 # --- Data Entry Tab ---
 with tab1:
-    st.header("")
+    # st.header("")
     
     # Initialize session state for input fields and slides
     if "subject" not in st.session_state:
