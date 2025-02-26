@@ -117,7 +117,7 @@ tab1, tab2, tab3 = st.tabs(["Enter Data", "Ask a Question", "Previous Uploads"])
 
 # --- Data Entry Tab ---
 with tab1:
-    st.header("Enter Your Data")
+    # st.header("Enter Your Data")
     
     if "subject" not in st.session_state:
         st.session_state.subject = ""
@@ -193,7 +193,7 @@ with tab1:
 
 # --- Question-Answering Tab ---
 with tab2:
-    st.header("Ask a Question")
+    # st.header("Ask a Question")
     question = st.text_input("Enter your question about the data")
     if st.button("Ask"):
         if question.strip():
@@ -229,7 +229,7 @@ with tab2:
 
 # --- Previous Uploads Tab ---
 with tab3:
-    st.header("Previous Uploads")
+    # st.header("Previous Uploads")
     
     try:
         pipeline = [
